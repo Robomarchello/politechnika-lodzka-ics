@@ -1,3 +1,5 @@
+name: Update calendar.ics
+
 - name: Update CA Certificates
   run: |
     sudo apt-get update
