@@ -1,4 +1,7 @@
-name: Update calendar.ics
+- name: Update CA Certificates
+  run: |
+    sudo apt-get update
+    sudo apt-get install --reinstall -y ca-certificates
 
 on:
   schedule:
