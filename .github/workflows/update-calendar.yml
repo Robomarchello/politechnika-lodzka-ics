@@ -27,12 +27,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Update system CA certificates
-        run: |
-          sudo apt-get update
-          sudo apt-get install --reinstall -y ca-certificates
-          sudo update-ca-certificates
-
       - name: Generate calendar.ics
         run: python generate_ics.py
 
