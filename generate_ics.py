@@ -1,11 +1,13 @@
 import argparse
 import hashlib
 import html
+import http.cookiejar
 import json
 import re
 import ssl
 import sys
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -18,26 +20,81 @@ UID_DOMAIN = "celcat-ics-subscription"
 
 
 # ----------------------------------------------------------------- download
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+)
+# Same calendar page the browser has open when it requests the events.
+PAGE_PATH = "/cal/?r=CyGr&v=chart&z=4&w=0&dt=1790553600000&dta=1790553600000"
+
+
+def _request(opener, url, *, method="GET", data=None, accept, referer=None):
+    headers = {
+        "User-Agent": UA,
+        "Accept": accept,
+        "Accept-Language": "en,en-US;q=0.9,pl;q=0.5",
+    }
+    if referer:
+        headers["Referer"] = referer
+    if method == "POST":
+        headers["Content-Type"] = "application/json"
+        headers["Origin"] = referer.split("/cal/")[0] if referer else ""
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with opener.open(req, timeout=30) as resp:
+        body = resp.read()
+        print(
+            f"{method} {url} -> HTTP {resp.status}, {resp.headers.get('Content-Type')}, "
+            f"{len(body)} bytes",
+            file=sys.stderr,
+        )
+        return resp.status, body
+
+
 def fetch_json(url, retries=3):
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (celcat-ics-subscription)",
-            "Accept": "application/json, text/plain, */*",
-        },
-    )
+    """Download the events the way the Celcat web app does.
+
+    The events endpoint answers 204 (empty) unless the request carries the session
+    cookies the app gets by loading the calendar page first, so replay that sequence.
+    """
+    parts = urllib.parse.urlsplit(url)
+    base = f"{parts.scheme}://{parts.netloc}"
+    page_url = base + PAGE_PATH
+    json_accept = "application/json, text/plain, */*"
+
+    # Start with default verification context
     ctx = ssl.create_default_context()
 
     last = None
     for attempt in range(1, retries + 1):
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(jar),
+            urllib.request.HTTPSHandler(context=ctx),
+        )
         body = b""
         try:
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-                body = resp.read()
-                print(f"HTTP {resp.status}, {resp.headers.get('Content-Type')}, "
-                      f"{len(body)} bytes, final URL: {resp.geturl()}", file=sys.stderr)
-                return json.loads(body.decode("utf-8"))
+            # Setup calls: failures here are logged but not fatal, the events call decides.
+            setup = [
+                ("GET", page_url, None, "text/html,application/xhtml+xml,*/*;q=0.8", None),
+                ("POST", base + "/cal/session", b"{}", json_accept, page_url),
+                ("GET", base + "/cal/resources/ids?1001=44", None, json_accept, page_url),
+            ]
+            for method, step_url, data, accept, referer in setup:
+                try:
+                    _request(opener, step_url, method=method, data=data,
+                             accept=accept, referer=referer)
+                except Exception as step_exc:  # noqa: BLE001
+                    if "CERTIFICATE_VERIFY_FAILED" in str(step_exc):
+                        raise
+                    print(f"setup step {method} {step_url} failed: {step_exc}", file=sys.stderr)
+            print(f"cookies: {sorted(c.name for c in jar)}", file=sys.stderr)
+
+            status, body = _request(opener, url, accept=json_accept, referer=page_url)
+            if not body.strip():
+                raise ValueError(f"empty response (HTTP {status})")
+            return json.loads(body.decode("utf-8"))
         except Exception as exc:  # noqa: BLE001
+            # Fall back to unverified context if the server has an incomplete cert chain
             if "CERTIFICATE_VERIFY_FAILED" in str(exc):
                 ctx = ssl._create_unverified_context()
             last = exc
