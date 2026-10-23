@@ -26,20 +26,24 @@ def fetch_json(url, retries=3):
             "Accept": "application/json, text/plain, */*",
         },
     )
-    # Start with default verification context
     ctx = ssl.create_default_context()
 
     last = None
     for attempt in range(1, retries + 1):
+        body = b""
         try:
             with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                body = resp.read()
+                print(f"HTTP {resp.status}, {resp.headers.get('Content-Type')}, "
+                      f"{len(body)} bytes, final URL: {resp.geturl()}", file=sys.stderr)
+                return json.loads(body.decode("utf-8"))
         except Exception as exc:  # noqa: BLE001
-            # Fall back to unverified context if the server has an incomplete cert chain
             if "CERTIFICATE_VERIFY_FAILED" in str(exc):
                 ctx = ssl._create_unverified_context()
             last = exc
             print(f"download attempt {attempt}/{retries} failed: {exc}", file=sys.stderr)
+            if body:
+                print(f"body starts with: {body[:300]!r}", file=sys.stderr)
             time.sleep(2 * attempt)
     raise SystemExit(f"Could not download {url}: {last}")
 
